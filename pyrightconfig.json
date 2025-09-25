@@ -1,0 +1,7 @@
+{
+  "typeCheckingMode": "basic",
+  "reportUnreachable": false,
+  "reportDeprecated": false,
+  "reportInvalidTypeForm": false,
+  "reportGeneralTypeIssues": false
+}

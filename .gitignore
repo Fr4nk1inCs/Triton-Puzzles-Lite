@@ -1,2 +1,6 @@
+.venv
+.direnv
+.DS_Store
+
 Trion-Puzzles/
 __pycache__/
