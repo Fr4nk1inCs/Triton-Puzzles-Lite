@@ -1,6 +1,6 @@
 import argparse
-from typing import List
 import os
+from typing import List
 
 import torch
 import triton
@@ -10,7 +10,6 @@ import triton.language as tl
 from display import print_end_line
 from tensor_type import Float32, Int32
 from test_puzzle import test
-
 
 """
 # Triton Puzzles Lite
@@ -215,7 +214,8 @@ def add_kernel(x_ptr, z_ptr, N0, B0: tl.constexpr):
     # We name the offsets of the pointers as "off_"
     off_x = tl.arange(0, B0)
     x = tl.load(x_ptr + off_x)
-    # Finish me!
+    x = x + 10.0
+    tl.store(z_ptr + off_x, x)
     return
 
 
@@ -236,7 +236,12 @@ def add2_spec(x: Float32[200,]) -> Float32[200,]:
 
 @triton.jit
 def add_mask2_kernel(x_ptr, z_ptr, N0, B0: tl.constexpr):
-    # Finish me!
+    pid = tl.program_id(axis=0)
+    offsets = tl.arange(0, B0) + B0 * pid
+    mask = offsets < N0
+    x = tl.load(x_ptr + offsets, mask=mask)
+    z = x + 10.0
+    tl.store(z_ptr + offsets, z, mask=mask)
     return
 
 
@@ -259,7 +264,14 @@ def add_vec_spec(x: Float32[32,], y: Float32[32,]) -> Float32[32, 32]:
 
 @triton.jit
 def add_vec_kernel(x_ptr, y_ptr, z_ptr, N0, N1, B0: tl.constexpr, B1: tl.constexpr):
-    # Finish me!
+    off_x = tl.arange(0, B0)
+    off_y = tl.arange(0, B1)
+    x = tl.load(x_ptr + off_x)
+    y = tl.load(y_ptr + off_y)
+    x_broadcasted = x[None, :]
+    y_broadcasted = y[:, None]
+    off_z = off_y[:, None] * B0 + off_x[None, :]
+    tl.store(z_ptr + off_z, x_broadcasted + y_broadcasted)
     return
 
 
@@ -286,7 +298,17 @@ def add_vec_block_kernel(
 ):
     block_id_x = tl.program_id(0)
     block_id_y = tl.program_id(1)
-    # Finish me!
+    off_x = tl.arange(0, B0) + B0 * block_id_x
+    off_y = tl.arange(0, B1) + B1 * block_id_y
+    off_z = off_y[:, None] * N0 + off_x[None, :]
+    mask_x = off_x < N0
+    mask_y = off_y < N1
+    mask_z = mask_x[None, :] & mask_y[:, None]
+    x = tl.load(x_ptr + off_x, mask=mask_x)
+    y = tl.load(y_ptr + off_y, mask=mask_y)
+    z = x[None, :] + y[:, None]
+    tl.store(z_ptr + off_z, z, mask=mask_z)
+
     return
 
 
@@ -313,7 +335,18 @@ def mul_relu_block_kernel(
 ):
     block_id_x = tl.program_id(0)
     block_id_y = tl.program_id(1)
-    # Finish me!
+    off_x = tl.arange(0, B0) + B0 * block_id_x
+    off_y = tl.arange(0, B1) + B1 * block_id_y
+    off_z = off_y[:, None] * N0 + off_x[None, :]
+    mask_x = off_x < N0
+    mask_y = off_y < N1
+    mask_z = mask_x[None, :] & mask_y[:, None]
+    x = tl.load(x_ptr + off_x, mask=mask_x)
+    y = tl.load(y_ptr + off_y, mask=mask_y)
+    z = x[None, :] * y[:, None]
+    relu_z = tl.where(z > 0, z, 0.0)
+    tl.store(z_ptr + off_z, relu_z, mask=mask_z)
+
     return
 
 
@@ -354,6 +387,22 @@ def mul_relu_block_back_kernel(
     block_id_i = tl.program_id(0)
     block_id_j = tl.program_id(1)
     # Finish me!
+    off_i = tl.arange(0, B0) + B0 * block_id_i
+    off_j = tl.arange(0, B1) + B1 * block_id_j
+    off_ji = off_j[:, None] * N0 + off_i[None, :]
+
+    mask_i = off_i < N0
+    mask_j = off_j < N1
+    mask_ji = mask_i[None, :] & mask_j[:, None]
+
+    x = tl.load(x_ptr + off_ji, mask=mask_ji)
+    y = tl.load(y_ptr + off_j, mask=mask_j)
+    dz = tl.load(dz_ptr + off_ji, mask=mask_ji)
+    df = tl.where(x * y[:, None] > 0, 1.0, 0.0)
+    dx = df * y[:, None] * dz
+
+    tl.store(dx_ptr + off_ji, dx, mask=mask_ji)
+
     return
 
 
@@ -379,6 +428,22 @@ def sum_spec(x: Float32[4, 200]) -> Float32[4,]:
 @triton.jit
 def sum_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
     # Finish me!
+    id_i = tl.program_id(0)
+    off_i = id_i * B0 + tl.arange(0, B0)
+    mask_i = off_i < N0
+
+    z = tl.zeros(shape=[B0], dtype=tl.float32)
+
+    for start_j in tl.range(0, T, B1):
+        off_j = start_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij)
+        z += tl.sum(x, axis=1)
+
+    tl.store(z_ptr + off_i, z, mask=mask_i)
+
     return
 
 
@@ -417,9 +482,36 @@ def softmax_spec(x: Float32[4, 200]) -> Float32[4, 200]:
 @triton.jit
 def softmax_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
     """2 loops ver."""
-    block_id_i = tl.program_id(0)
     log2_e = 1.44269504
     # Finish me!
+    id_i = tl.program_id(0)
+    off_i = id_i * B0 + tl.arange(0, B0)
+    mask_i = off_i < N0
+
+    exp_sum = tl.zeros([B0], tl.float32)
+    x_max = tl.full([B0], -float("inf"), tl.float32)
+    new_x_max = tl.full([B0], -float("inf"), tl.float32)
+
+    for start_j in tl.range(0, T, B1):
+        off_j = start_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij)
+        block_max = tl.max(x)
+        new_x_max = tl.maximum(x_max, block_max)
+        exp_sum *= tl.exp2(log2_e * (x_max - new_x_max))
+        exp_sum += tl.sum(tl.exp2(log2_e * (x - new_x_max[:, None])))
+        x_max = new_x_max
+
+    for start_j in tl.range(0, T, B1):
+        off_j = start_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij) - x_max[:, None]
+        z = tl.exp2(x * log2_e) / exp_sum[:, None]
+        tl.store(z_ptr + off_ij, z, mask=mask_ij)
     return
 
 
@@ -428,9 +520,39 @@ def softmax_kernel_brute_force(
     x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr
 ):
     """3 loops ver."""
-    block_id_i = tl.program_id(0)
     log2_e = 1.44269504
     # Finish me!
+    id_i = tl.program_id(0)
+    off_i = id_i * B0 + tl.arange(0, B0)
+    mask_i = off_i < N0
+
+    x_max = tl.full([B0], -float("inf"), tl.float32)
+    for start_j in tl.range(0, T, B1):
+        off_j = start_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij)
+        block_max = tl.max(x)
+        x_max = tl.maximum(x_max, block_max)
+
+    exp_sum = tl.zeros([B0], tl.float32)
+    for start_j in tl.range(0, T, B1):
+        off_j = start_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij) - x_max[:, None]
+        exp_sum += tl.sum(tl.exp2(x * log2_e))
+
+    for start_j in tl.range(0, T, B1):
+        off_j = start_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij) - x_max[:, None]
+        z = tl.exp2(x * log2_e) / exp_sum[:, None]
+        tl.store(z_ptr + off_ij, z, mask=mask_ij)
     return
 
 
@@ -462,13 +584,47 @@ def flashatt_spec(
 
 
 @triton.jit
+def myexp(x):
+    log2_e = 1.44269504
+    return tl.exp2(log2_e * x)
+
+
+@triton.jit
 def flashatt_kernel(
     q_ptr, k_ptr, v_ptr, z_ptr, N0, T, B0: tl.constexpr, B1: tl.constexpr
 ):
     block_id_i = tl.program_id(0)
-    log2_e = 1.44269504
-    myexp = lambda x: tl.exp2(log2_e * x)
     # Finish me!
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    mask_i = off_i < N0
+    q = tl.load(q_ptr + off_i, mask=mask_i)
+
+    max_qk = tl.full([B0], -float("inf"), tl.float32)
+    new_max_qk = tl.full([B0], -float("inf"), tl.float32)
+    exp_sum = tl.zeros([B0], tl.float32)
+    z = tl.zeros([B0], tl.float32)
+
+    for start_j in tl.range(0, T, B1):
+        off_j = start_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+
+        k = tl.load(k_ptr + off_j, mask=mask_j)
+        v = tl.load(v_ptr + off_j, mask=mask_j)
+
+        qk = q[:, None] * k[None, :] + tl.where(mask_ij, 0, -float("inf"))
+        block_max = tl.max(qk)
+        new_max_qk = tl.maximum(max_qk, block_max)
+
+        exp_qk = myexp(qk - new_max_qk[:, None])
+        exp_sum *= myexp(max_qk - new_max_qk)
+        z *= myexp(max_qk - new_max_qk)
+        exp_sum += tl.sum(exp_qk)
+        z += tl.sum(exp_qk * v)
+
+        max_qk = new_max_qk
+
+    tl.store(z_ptr + off_i, z / exp_sum, mask_i)
     return
 
 
