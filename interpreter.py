@@ -1,31 +1,22 @@
 # Reference: https://github.com/Deep-Learning-Profiling-Tools/triton-viz/commit/434fa2000a211c9958d570b6369df3b41d93a97a
 
 import inspect
-import triton.language as tl
-import numpy as np
-
-
-from triton.runtime.interpreter import (
-    GridExecutor,
-    _implicit_cvt,
-    RESERVED_KWS,
-    interpreter_builder,
-    InterpretedFunction,
-)
-from triton.runtime.interpreter import _patch_lang as triton_patch_lang
-from triton.runtime import JITFunction
-from typing import Tuple, List, Optional
+import traceback
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from functools import wraps
+from typing import Any, List, Optional, Tuple
 
+import numpy as np
+import numpy.typing as npt
+import triton.language as tl
+from triton.runtime import JITFunction
+from triton.runtime.interpreter import (GridExecutor, InterpretedFunction,
+                                        _implicit_cvt)
+from triton.runtime.interpreter import _patch_lang as triton_patch_lang
+from triton.runtime.interpreter import interpreter_builder
 
 ## Op
-
-from dataclasses import dataclass, field
-from typing import List, Tuple, Any
-import traceback
-import numpy.typing as npt
-import numpy as np
 
 
 @dataclass
@@ -79,6 +70,7 @@ class BinaryOp(Op):
 
 @dataclass
 class MakeRange(Op):
+    ret_ty_ir: object
     start: int
     end: int
 
@@ -128,6 +120,7 @@ class Launch:
 
 
 ## Interpreter
+
 
 def _patch_lang(fn):
     triton_patch_lang(fn)
@@ -236,10 +229,13 @@ def _check_storage_contiguous(tensor):
 
 
 def _grid_executor_call(self, *args_dev, **kwargs):
-    # Removes reserved keywords from kwargs
-    kwargs = {k: v for k, v in kwargs.items() if k not in RESERVED_KWS}
     if kwargs.pop("warmup", False):
         return
+    # Removes not used reserved keywords from kwargs
+    # Triton doesn't support keyword-only, variable positional or variable keyword arguments
+    # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
+    argspec = inspect.getfullargspec(self.fn)
+    kwargs = {k: v for k, v in kwargs.items() if k in argspec.args}
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
     # Remaps core language functions to interpreted ones
     _patch_lang(self.fn)
@@ -370,10 +366,10 @@ def _create_masked_store(fn):
 
 def _create_make_range(fn):
     @wraps(fn)
-    def wrapper(start, stop):
-        range_record = MakeRange(start=start, end=stop)
+    def wrapper(ret_ty_ir, start, stop):
+        range_record = MakeRange(ret_ty_ir=ret_ty_ir, start=start, end=stop)
         record_builder.add_record(range_record)
-        return fn(start, stop)
+        return fn(ret_ty_ir, start, stop)
 
     return wrapper
 
@@ -483,6 +479,7 @@ def patch():
 
 ## Collect
 
+
 def collect_grid():
     for launch in record_builder.launches[-1:]:
         records, tensor_table, failures, access_offsets = collect_launch(launch)
@@ -510,6 +507,6 @@ def collect_launch(launch):
             access_offsets[last_grid.idx] = r.original_offsets
             if (r.invalid_access_masks & r.original_masks).any():
                 failures[last_grid.idx] = ~(r.invalid_access_masks & r.original_masks)
-            
+
     all_grids[last_grid.idx] = program_records
     return all_grids, tensor_table, failures, access_offsets
