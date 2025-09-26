@@ -658,6 +658,27 @@ def conv2d_kernel(
 ):
     block_id_i = tl.program_id(0)
     # Finish me!
+
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    mask_i = off_i < N0
+    off_h = tl.arange(0, KH)
+    off_w = tl.arange(0, KW)
+    off_hw = off_h[:, None] * KW + off_w[None, :]
+
+    k = tl.load(k_ptr + off_hw).reshape(KH * KW)
+
+    for j in tl.range(0, H):
+        for l in tl.range(0, W):
+            off_j_oj = j + off_h[None, :, None]
+            off_l_ol = l + off_w[None, None, :]
+            off_x = off_i[:, None, None] * H * W + off_j_oj * W + off_l_ol
+            mask_x = (off_j_oj < H) & (off_l_ol < W)
+            x = tl.load(x_ptr + off_x, mask=mask_x, other=0).reshape(B0, KH * KW)
+            z = tl.sum(x * k[None, :], axis=1)
+            off_z = off_i * H * W + j * W + l
+
+            tl.store(z_ptr + off_z, z, mask_i)
+
     return
 
 
@@ -704,6 +725,41 @@ def dot_kernel(
     block_id_k = tl.program_id(1)
     block_id_i = tl.program_id(2)
     # Finish me!
+    off_i = block_id_i * B2 + tl.arange(0, B2)
+    off_j = block_id_j * B0 + tl.arange(0, B0)
+    off_k = block_id_k * B1 + tl.arange(0, B1)
+
+    mask_i = off_i < N2
+    mask_j = off_j < N0
+    mask_k = off_k < N1
+
+    off_ijk = (
+        off_i[:, None, None] * N0 * N1
+        + off_j[None, :, None] * N1
+        + off_k[None, None, :]
+    )
+    mask_ijk = mask_i[:, None, None] & mask_j[None, :, None] & mask_k[None, None, :]
+    z = tl.zeros([B2, B0, B1], dtype=tl.float32)
+
+    off_ijl_base = off_i[:, None, None] * N0 * MID + off_j[None, :, None] * MID
+    off_ilk_base = off_i[:, None, None] * MID * N1 + off_k[None, None, :]
+    mask_ijl_base = mask_i[:, None, None] & mask_j[None, :, None]
+    mask_ilk_base = mask_i[:, None, None] & mask_k[None, None, :]
+
+    for start_l in tl.range(0, MID, B_MID):
+        off_l = start_l + tl.arange(0, B_MID)
+        mask_l = off_l < MID
+
+        off_ijl = off_ijl_base + off_l[None, None, :]
+        mask_ijl = mask_ijl_base & mask_l[None, None, :]
+        off_ilk = off_ilk_base + off_l[None, :, None] * N1
+        mask_ilk = mask_ilk_base & mask_l[None, :, None]
+
+        x = tl.load(x_ptr + off_ijl, mask=mask_ijl, other=0.0)
+        y = tl.load(y_ptr + off_ilk, mask=mask_ilk, other=0.0)
+        z += tl.dot(x, y)
+
+    tl.store(z_ptr + off_ijk, z, mask=mask_ijk)
     return
 
 
@@ -770,6 +826,58 @@ def quant_dot_kernel(
     block_id_j = tl.program_id(0)
     block_id_k = tl.program_id(1)
     # Finish me!
+    off_j = block_id_j * B0 + tl.arange(0, B0)
+    off_k = block_id_k * B1 + tl.arange(0, B1)
+
+    mask_j = off_j < N0
+    mask_k = off_k < N1
+
+    FPINT: tl.constexpr = tl.constexpr(32 // 4)
+    GROUP: tl.constexpr = tl.constexpr(8)
+    PACKED_GROUP: tl.constexpr = FPINT * GROUP
+    BITS = 4
+
+    off_z = off_j[:, None] * N1 + off_k
+    mask_z = mask_j[:, None] & mask_k[None, :]
+    z = tl.zeros([B0, B1], tl.float32)
+
+    for l in tl.range(0, MID, B_MID):
+        off_scale_l = l // GROUP + tl.arange(0, B_MID // GROUP)
+        mask_scale_l = off_scale_l < (MID // GROUP)
+        off_scale = off_j[:, None] * (MID // GROUP) + off_scale_l[None, :]
+        mask_scale = mask_j[:, None] & mask_scale_l[None, :]
+        scale = tl.load(scale_ptr + off_scale, mask=mask_scale)
+
+        off_shift_l = l // PACKED_GROUP + tl.arange(0, B_MID // PACKED_GROUP)
+        mask_shift_l = off_shift_l < (MID // PACKED_GROUP)
+        off_shift = off_j[:, None] * (MID // PACKED_GROUP) + off_shift_l[None, :]
+        mask_shift = mask_j[:, None] & mask_shift_l[None, :]
+        packed_shift = tl.load(offset_ptr + off_shift, mask=mask_shift)
+
+        off_weight_l = l // FPINT + tl.arange(0, B_MID // FPINT)
+        mask_weight_l = off_weight_l < (MID // FPINT)
+        off_weight = off_j[:, None] * (MID // FPINT) + off_weight_l[None, :]
+        mask_weight = mask_j[:, None] & mask_weight_l[None, :]
+        packed_weight = tl.load(weight_ptr + off_weight, mask=mask_weight)
+
+        off_l = l + tl.arange(0, B_MID)
+        mask_l = off_l < MID
+        off_y = off_l[:, None] * N1 + off_k[None, :]
+        mask_y = mask_l[:, None] & mask_k[None, :]
+        y = tl.load(activation_ptr + off_y, mask=mask_y)
+
+        unpack_off = tl.arange(0, FPINT) * BITS
+        unpack_mask = (1 << BITS) - 1
+        shift = tl.reshape(
+            (packed_shift[:, :, None] >> unpack_off) & unpack_mask, [B0, B_MID // GROUP]
+        )
+        weight = (packed_weight[:, :, None] >> unpack_off) & unpack_mask
+        transformed = scale[:, :, None] * (weight - shift[:, :, None])
+
+        z += tl.dot(transformed.reshape(B0, B_MID), y)
+
+    tl.store(z_ptr + off_z, z, mask=mask_z)
+
     return
 
 
@@ -900,7 +1008,7 @@ def run_puzzles(args, puzzles: List[int]):
         ok = test(
             conv2d_kernel,
             conv2d_spec,
-            B={"B0": 1},
+            B={"B0": 2},
             nelem={"N0": 4, "H": 8, "W": 8, "KH": 4, "KW": 4},
             print_log=print_log,
             device=device,
@@ -913,7 +1021,7 @@ def run_puzzles(args, puzzles: List[int]):
         ok = test(
             dot_kernel,
             dot_spec,
-            B={"B0": 16, "B1": 16, "B2": 1, "B_MID": 16},
+            B={"B0": 16, "B1": 16, "B2": 2, "B_MID": 16},
             nelem={"N0": 32, "N1": 32, "N2": 4, "MID": 32},
             print_log=print_log,
             device=device,
