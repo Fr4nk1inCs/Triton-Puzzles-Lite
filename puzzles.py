@@ -571,10 +571,11 @@ However, it is a bit more complex since we need to also extract the 4-bit values
 Note:
 - We don't consider batch size, i.e. `i`, in this puzzle.
 - Remember to unpack the `FPINT` values into separate 4-bit values. This contains some shape manipulation.
+- Use `tl.dot` with `input_precision="ieee"` to do the final matrix multiplication. This avoids precision issue on GPU.
 """
 
-FPINT = 32 // 4
-GROUP = 8
+FPINT: tl.constexpr = 32 // 4
+GROUP: tl.constexpr = 8
 
 
 def quant_dot_spec(
@@ -614,6 +615,7 @@ def quant_dot_kernel(
     block_id_j = tl.program_id(0)
     block_id_k = tl.program_id(1)
     # Finish me!
+    # remember to add `input_precision="ieee"` when using tl.dot
     return
 
 
