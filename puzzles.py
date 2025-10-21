@@ -725,6 +725,12 @@ def dot_kernel(
     block_id_k = tl.program_id(1)
     block_id_i = tl.program_id(2)
     # Finish me!
+    num_blocks_j = tl.cdiv(N0, B0)
+    num_blocks_k = tl.cdiv(N1, B1)
+    block_id_i, block_id_j = tl.swizzle2d(
+        block_id_i, block_id_j, num_blocks_j, num_blocks_k, 8
+    )
+
     off_i = block_id_i * B2 + tl.arange(0, B2)
     off_j = block_id_j * B0 + tl.arange(0, B0)
     off_k = block_id_k * B1 + tl.arange(0, B1)
@@ -874,7 +880,7 @@ def quant_dot_kernel(
         weight = (packed_weight[:, :, None] >> unpack_off) & unpack_mask
         transformed = scale[:, :, None] * (weight - shift[:, :, None])
 
-        z += tl.dot(transformed.reshape(B0, B_MID), y)
+        z += tl.dot(transformed.reshape(B0, B_MID), y, input_precision="ieee")
 
     tl.store(z_ptr + off_z, z, mask=mask_z)
 
